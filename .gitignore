@@ -1,0 +1,5 @@
+uploads/
+.env
+qdrant.txt
+__pycache__/
+*.pyc
