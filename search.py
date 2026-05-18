@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# Python libraries
 import hashlib
 import os
 import re
@@ -8,11 +9,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+# env, UI, PDF parsing
 from dotenv import load_dotenv
 import streamlit as st
 from PyPDF2 import PdfReader
+
+# Chunking, lấy vector Qdrant.
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient, models
+
+# Hashing vectorizer 
 from sklearn.feature_extraction.text import HashingVectorizer
 
 
@@ -47,11 +53,13 @@ class Chunk:
     document_id: str
 
 
+# Tạo folder upload
 def ensure_upload_dir() -> Path:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     return UPLOAD_DIR
 
 
+# Save file PDF upload vào máy
 def save_uploaded_pdf(file_name: str, file_bytes: bytes) -> Path:
     upload_dir = ensure_upload_dir()
     safe_name = Path(file_name).name
@@ -60,15 +68,18 @@ def save_uploaded_pdf(file_name: str, file_bytes: bytes) -> Path:
     return file_path
 
 
+# Tạo mã định danh cho tài liệu dựa trên nội dung của nó.
 def get_document_id(file_bytes: bytes) -> str:
     return hashlib.sha1(file_bytes).hexdigest()
 
 
+# Lấy text từng trang từ PDF, giữ xuống dòng và khoảng trắng.
 def extract_pdf_text(file_path: Path) -> list[tuple[int, str]]:
     reader = PdfReader(str(file_path))
     pages: list[tuple[int, str]] = []
     for index, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
+        # Giữ lại xuống dòng để splitter tách theo đoạn và câu tốt hơn.
         text = re.sub(r"\r\n?", "\n", text)
         text = re.sub(r"[ \t\f\v]+", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
@@ -78,7 +89,9 @@ def extract_pdf_text(file_path: Path) -> list[tuple[int, str]]:
     return pages
 
 
+# Tách text theo cấu trúc từ lớn đến nhỏ
 def split_text_into_chunks(text: str, chunk_size: int, overlap: int) -> list[str]:
+    # Tách theo thứ tự: đoạn văn -> dòng -> câu -> từ.
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=overlap,
@@ -87,6 +100,7 @@ def split_text_into_chunks(text: str, chunk_size: int, overlap: int) -> list[str
     return splitter.split_text(text)
 
 
+# Tạo danh sách các chunk với metadata để lưu vào Qdrant.
 def build_chunks(pages: Iterable[tuple[int, str]], chunk_size: int, overlap: int, source_name: str, document_id: str) -> list[Chunk]:
     chunks: list[Chunk] = []
     for page_number, text in pages:
@@ -103,12 +117,14 @@ def build_chunks(pages: Iterable[tuple[int, str]], chunk_size: int, overlap: int
     return chunks
 
 
+# Client kết nối Qdrant, dùng để tạo collection, upsert và tìm kiếm.
 def get_qdrant_client() -> QdrantClient:
     if not QDRANT_URL or not QDRANT_API_KEY:
         raise ValueError("Set QDRANT_URL and QDRANT_API_KEY in .env")
     return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
 
+# Đảm bảo collection tồn tại trong Qdrant, nếu chưa có thì tạo mới với cấu hình vector.
 def ensure_collection(client: QdrantClient) -> None:
     if not client.collection_exists(QDRANT_COLLECTION):
         client.create_collection(
@@ -127,16 +143,19 @@ def ensure_collection(client: QdrantClient) -> None:
     )
 
 
+# Chuyển text thành vector 
 def vectorize_text(text: str) -> list[float]:
     vector = HASHING_VECTORIZER.transform([text]).toarray()[0]
     return vector.astype(float).tolist()
 
 
+# Ghi chunk vào Qdrant, xóa chunk cũ nếu trùng lặp.
 def upsert_chunks(client: QdrantClient, chunks: list[Chunk]) -> None:
     if not chunks:
         return
 
     document_id = chunks[0].document_id
+    # Xóa chunk cũ của cùng tài liệu trước khi ghi lại.
     client.delete(
         collection_name=QDRANT_COLLECTION,
         points_selector=models.Filter(
@@ -164,6 +183,7 @@ def upsert_chunks(client: QdrantClient, chunks: list[Chunk]) -> None:
     client.upsert(collection_name=QDRANT_COLLECTION, points=points)
 
 
+# Tìm chunk gần nhất theo user query
 def search_chunks(client: QdrantClient, query: str, document_id: str, top_k: int):
     return client.query_points(
         collection_name=QDRANT_COLLECTION,
@@ -181,11 +201,13 @@ def search_chunks(client: QdrantClient, query: str, document_id: str, top_k: int
     ).points
 
 
+# Tạo demo answer hiển thị
 def make_demo_answer(query: str, retrieved) -> str:
     if not retrieved:
         return "I could not find a strong match in the uploaded PDF. Try a different wording or upload a longer document."
 
     contexts: list[str] = []
+    # Ghép 3 chunk tốt nhất để người dùng nhìn thấy ngữ cảnh đầy đủ hơn.
     for rank, point in enumerate(retrieved[:3], start=1):
         payload = point.payload or {}
         page_number = payload.get("page_number", "?")
@@ -202,6 +224,7 @@ def make_demo_answer(query: str, retrieved) -> str:
     )
 
 
+# Xóa trạng thái file cũ để người dùng có thể upload và index file mới.
 def reset_index() -> None:
     st.session_state.pop("source_name", None)
     st.session_state.pop("page_count", None)
@@ -210,6 +233,7 @@ def reset_index() -> None:
     st.session_state.pop("indexed_points", None)
 
 
+# Streamlit main func
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
