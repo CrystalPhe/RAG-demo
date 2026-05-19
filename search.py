@@ -10,6 +10,7 @@ from config import (
     DEFAULT_TOP_K,
     CONTEXT_MAX_CHUNKS,
     CONTEXT_MIN_SCORE,
+    RERANK_ENABLED_DEFAULT,
     QDRANT_URL,
     QDRANT_API_KEY,
     OPENROUTER_API_KEY,
@@ -26,6 +27,7 @@ from pdf_utils import (
 from embeddings import load_embedding_model, vectorize_query, vectorize_passage, vectorize_passages
 from qdrant_utils import get_qdrant_client, ensure_collection, upsert_chunks, search_chunks
 from openrouter import ask_openrouter
+from reranker import rerank_retrieved
 
 CHUNKING_VERSION = 3
 
@@ -85,26 +87,31 @@ def main() -> None:
 
         st.header("PDF Settings")
         uploaded_file = st.file_uploader("Choose a PDF", type=["pdf"])
-        chunk_size = st.slider("Chunk size (characters)", min_value=200, max_value=4000, value=1000, step=100)
+        chunk_size = st.slider("Chunk size (characters)", min_value=200, max_value=4000, value=700, step=100)
         chunk_overlap = st.slider("Chunk overlap (characters)", min_value=0, max_value=1000, value=200, step=50)
         use_semantic_chunking = st.checkbox("Use semantic chunking", value=True)
         semantic_similarity_threshold = st.slider(
             "Semantic boundary threshold",
             min_value=0.40,
             max_value=0.90,
-            value=0.62,
+            value=0.70,
             step=0.01,
             disabled=not use_semantic_chunking,
             help="Lower value keeps larger topic blocks. Higher value creates more topic boundaries.",
         )
         semantic_min_chunk_chars = st.slider(
             "Min chars before topic split",
-            min_value=120,
+            min_value=200,
             max_value=800,
             value=250,
             step=10,
             disabled=not use_semantic_chunking,
             help="Avoids tiny chunks by requiring a minimum chunk length before semantic splitting.",
+        )
+        use_reranker = st.checkbox(
+            "Use reranker",
+            value=RERANK_ENABLED_DEFAULT,
+            help="Re-rank retrieved chunks with a cross-encoder for better semantic precision.",
         )
         top_k = st.slider("Top K retrieved chunks", min_value=1, max_value=10, value=DEFAULT_TOP_K, step=1)
 
@@ -165,22 +172,39 @@ def main() -> None:
         if question:
             try:
                 client = get_qdrant_client()
-                retrieved = search_chunks(client, vectorize_query(question), document_id, top_k)
+                # Fetch more raw hits for informational display (fetch at least 10 or top_k, whichever is larger)
+                raw_limit = max(top_k, 10)
+                raw_retrieved = list(search_chunks(client, vectorize_query(question), document_id, raw_limit))
             except Exception as exc:
                 st.error(f"Qdrant search failed: {exc}")
-                retrieved = []
+                raw_retrieved = []
+
+            # Keep the original vector-ranked results for informational display.
+            retrieved_vector = raw_retrieved[:top_k]
+
+            # Rerank if requested; `retrieved_reranked` is used for answering and main context.
+            retrieved_reranked = []
+            if retrieved_vector:
+                if use_reranker:
+                    try:
+                        retrieved_reranked = rerank_retrieved(question, retrieved_vector, top_k)
+                    except Exception as exc:
+                        st.warning(f"Reranker failed, using vector ranking only: {exc}")
+                        retrieved_reranked = retrieved_vector
+                else:
+                    retrieved_reranked = retrieved_vector
 
             st.subheader("AI answer")
             try:
-                st.write(ask_openrouter(question, retrieved))
+                st.write(ask_openrouter(question, retrieved_reranked))
             except Exception as exc:
                 st.error(f"OpenRouter request failed: {exc}")
                 st.write("Here is the retrieved context instead:")
-                st.write(format_retrieved_context(retrieved) or "No context retrieved.")
+                st.write(format_retrieved_context(retrieved_reranked) or "No context retrieved.")
 
             st.subheader("Retrieved context")
-            if retrieved:
-                for rank, point in enumerate(retrieved, start=1):
+            if retrieved_reranked:
+                for rank, point in enumerate(retrieved_reranked, start=1):
                     payload = point.payload or {}
                     page_number = payload.get("page_number", "?")
                     chunk_index = payload.get("chunk_index", "?")
@@ -189,6 +213,19 @@ def main() -> None:
                         st.write(payload.get("text", ""))
             else:
                 st.info("No relevant chunk found. Try changing the question or increasing chunk size.")
+
+            # For informational purposes, show the original vector-ranked chunks below everything.
+            st.subheader("Raw retrieved chunks (vector ranking)")
+            if retrieved_vector:
+                for rank, point in enumerate(retrieved_vector, start=1):
+                    payload = point.payload or {}
+                    page_number = payload.get("page_number", "?")
+                    chunk_index = payload.get("chunk_index", "?")
+                    score = getattr(point, "score", 0.0)
+                    with st.expander(f"Vector Match {rank} | page {page_number} | chunk {chunk_index} | score {score:.3f}"):
+                        st.write(payload.get("text", ""))
+            else:
+                st.info("No raw retrieved chunks available.")
     else:
         st.info("Upload a PDF to build the Qdrant index.")
 
