@@ -87,8 +87,8 @@ def main() -> None:
 
         st.header("PDF Settings")
         uploaded_file = st.file_uploader("Choose a PDF", type=["pdf"])
-        chunk_size = st.slider("Chunk size (characters)", min_value=200, max_value=4000, value=700, step=100)
-        chunk_overlap = st.slider("Chunk overlap (characters)", min_value=0, max_value=1000, value=200, step=50)
+        chunk_size = st.slider("Chunk size (characters)", min_value=200, max_value=4000, value=1200, step=100)
+        chunk_overlap = st.slider("Chunk overlap (characters)", min_value=0, max_value=1000, value=350, step=50)
         use_semantic_chunking = st.checkbox("Use semantic chunking", value=True)
         semantic_similarity_threshold = st.slider(
             "Semantic boundary threshold",

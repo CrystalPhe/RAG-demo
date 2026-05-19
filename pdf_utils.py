@@ -42,20 +42,35 @@ def normalize_pdf_text(text: str) -> str:
     text = re.sub(r"\r\n?", "\n", text)
     text = re.sub(r"-\n(?=\w)", "", text)
     text = re.sub(r"[ \t\f\v]+", " ", text)
-
-    paragraphs: list[str] = []
+    # Remove common page headers/footers like 'PAGE 41' or 'Page 41'
+    text = re.sub(r"(?im)^\s*page\s+\d+\s*$", "", text)
+    # Remove simple repeated header/footer lines often in all-caps and very short (e.g., CHAPTER titles)
+    cleaned_paragraphs: list[str] = []
     for paragraph in re.split(r"\n\s*\n", text):
         lines = [re.sub(r"\s+", " ", line).strip() for line in paragraph.split("\n")]
-        lines = [line for line in lines if line]
-        if lines:
-            paragraphs.append(" ".join(lines))
+        # Filter out empty lines and common footer/header lines
+        filtered_lines: list[str] = []
+        for line in lines:
+            if not line:
+                continue
+            # Drop lines that look like page markers (e.g., 'PAGE 41')
+            if re.match(r"(?i)^page\s+\d+$", line):
+                continue
+            # Drop lines that are all-caps and short (likely headings or running headers)
+            words = line.split()
+            if len(words) <= 4 and line.upper() == line and re.search(r"[A-Z]", line):
+                continue
+            filtered_lines.append(line)
 
-    if paragraphs:
-        short_paragraphs = sum(1 for paragraph in paragraphs if len(paragraph.split()) <= 3)
-        if short_paragraphs / len(paragraphs) >= 0.6:
-            return " ".join(paragraphs).strip()
+        if filtered_lines:
+            cleaned_paragraphs.append(" ".join(filtered_lines))
 
-    return "\n\n".join(paragraphs).strip()
+    if cleaned_paragraphs:
+        short_paragraphs = sum(1 for paragraph in cleaned_paragraphs if len(paragraph.split()) <= 3)
+        if short_paragraphs / len(cleaned_paragraphs) >= 0.6:
+            return " ".join(cleaned_paragraphs).strip()
+
+    return "\n\n".join(cleaned_paragraphs).strip()
 
 
 def extract_pdf_text(file_path: Path) -> list[tuple[int, str]]:
@@ -125,7 +140,8 @@ def split_text_into_chunks(text: str, chunk_size: int, overlap: int) -> list[str
         current_len = current_len + addition if current_len else len(sentence)
 
     flush_current()
-    return chunks
+    # Merge very small chunks into neighbors to avoid noisy single-line chunks
+    return _merge_small_chunks(chunks, min_chars=max(100, chunk_size // 4))
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -215,7 +231,27 @@ def split_text_semantic(
         current_len = current_len + addition if current_len else sentence_len
 
     flush_current()
-    return chunks
+    # Merge very small chunks into neighbors to avoid noisy single-line chunks
+    return _merge_small_chunks(chunks, min_chars=max(min_chunk_chars, chunk_size // 4))
+
+
+def _merge_small_chunks(chunks: list[str], min_chars: int) -> list[str]:
+    if not chunks:
+        return []
+    merged: list[str] = []
+    for chunk in chunks:
+        if not merged:
+            merged.append(chunk)
+            continue
+
+        if len(chunk) < min_chars:
+            # merge into previous chunk to avoid tiny standalone chunks
+            merged[-1] = (merged[-1] + " " + chunk).strip()
+        else:
+            merged.append(chunk)
+
+    # If after merging the first chunk is still too small (e.g., only one tiny chunk), leave as-is
+    return merged
 
 
 def build_chunks(
