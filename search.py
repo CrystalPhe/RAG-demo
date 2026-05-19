@@ -2,12 +2,15 @@ from __future__ import annotations
 
 # Python libraries
 import hashlib
+import json
 import os
 import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 # env, UI, PDF parsing
 from dotenv import load_dotenv
@@ -34,6 +37,11 @@ VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "384"))
 QDRANT_URL = os.getenv("QDRANT_URL", "")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "pdf_demo_chunks")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
+OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "")
+OPENROUTER_APP_TITLE = os.getenv("OPENROUTER_APP_TITLE", APP_TITLE)
 
 HASHING_VECTORIZER = HashingVectorizer(
     n_features=VECTOR_SIZE,
@@ -201,13 +209,9 @@ def search_chunks(client: QdrantClient, query: str, document_id: str, top_k: int
     ).points
 
 
-# Tạo demo answer hiển thị
-def make_demo_answer(query: str, retrieved) -> str:
-    if not retrieved:
-        return "I could not find a strong match in the uploaded PDF. Try a different wording or upload a longer document."
-
+# Chuẩn bị context từ các chunk đã lấy được.
+def format_retrieved_context(retrieved) -> str:
     contexts: list[str] = []
-    # Ghép 3 chunk tốt nhất để người dùng nhìn thấy ngữ cảnh đầy đủ hơn.
     for rank, point in enumerate(retrieved[:3], start=1):
         payload = point.payload or {}
         page_number = payload.get("page_number", "?")
@@ -215,13 +219,75 @@ def make_demo_answer(query: str, retrieved) -> str:
         text = str(payload.get("text", "")).strip()
         if text:
             contexts.append(f"Match {rank} | page {page_number} | chunk {chunk_index}\n{text}")
+    return "\n\n".join(contexts)
 
-    answer = "\n\n".join(contexts)
-    return (
-        "This is a Qdrant-backed retrieval demo. The most relevant context I found is:\n\n"
-        f"{answer}\n\n"
-        f"Question: {query}"
-    )
+
+# Gọi OpenRouter để tạo câu trả lời dựa trên context từ Qdrant.
+def ask_openrouter(question: str, retrieved) -> str:
+    if not OPENROUTER_API_KEY:
+        return "Set OPENROUTER_API_KEY to generate an AI answer from the retrieved Qdrant context."
+
+    context = format_retrieved_context(retrieved)
+    if not context:
+        return "I could not find a strong match in the uploaded PDF, so there is not enough context to reason over."
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a grounded assistant for PDF question answering. "
+                "Use only the provided context from Qdrant. "
+                "If the context does not contain the answer, say that you do not know. "
+                "Cite page and chunk numbers when helpful."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Question:\n{question}\n\n"
+                f"Context from Qdrant:\n{context}"
+            ),
+        },
+    ]
+
+    payload = json.dumps(
+        {
+            "model": OPENROUTER_MODEL,
+            "messages": messages,
+            "temperature": 0.2,
+        }
+    ).encode("utf-8")
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if OPENROUTER_HTTP_REFERER:
+        headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
+    if OPENROUTER_APP_TITLE:
+        headers["X-Title"] = OPENROUTER_APP_TITLE
+
+    request = Request(OPENROUTER_BASE_URL, data=payload, headers=headers, method="POST")
+
+    try:
+        with urlopen(request, timeout=60) as response:
+            response_text = response.read().decode("utf-8")
+    except HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
+        raise RuntimeError(f"OpenRouter request failed: {exc.code} {details}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OpenRouter request failed: {exc.reason}") from exc
+
+    data = json.loads(response_text)
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("OpenRouter returned no choices.")
+
+    message = choices[0].get("message") or {}
+    content = str(message.get("content", "")).strip()
+    if not content:
+        raise RuntimeError("OpenRouter returned an empty response.")
+    return content
 
 
 # Xóa trạng thái file cũ để người dùng có thể upload và index file mới.
@@ -245,6 +311,11 @@ def main() -> None:
             st.success("Qdrant config loaded from .env")
         else:
             st.error("Set QDRANT_URL and QDRANT_API_KEY in .env")
+
+        if OPENROUTER_API_KEY:
+            st.success(f"OpenRouter loaded: {OPENROUTER_MODEL}")
+        else:
+            st.warning("Set OPENROUTER_API_KEY to enable AI reasoning")
 
         st.header("PDF Settings")
         uploaded_file = st.file_uploader("Choose a PDF", type=["pdf"])
@@ -296,8 +367,13 @@ def main() -> None:
                 st.error(f"Qdrant search failed: {exc}")
                 retrieved = []
 
-            st.subheader("Demo answer")
-            st.write(make_demo_answer(question, retrieved))
+            st.subheader("AI answer")
+            try:
+                st.write(ask_openrouter(question, retrieved))
+            except Exception as exc:
+                st.error(f"OpenRouter request failed: {exc}")
+                st.write("Here is the retrieved context instead:")
+                st.write(format_retrieved_context(retrieved) or "No context retrieved.")
 
             st.subheader("Retrieved context")
             if retrieved:
@@ -322,9 +398,8 @@ def main() -> None:
             4. Each chunk is embedded locally with a hashing vectorizer.
             5. The vectors are stored in Qdrant with document metadata.
             6. A question is embedded and searched against the same Qdrant collection.
-            7. The top chunks are shown as retrieved context.
-
-            In a full RAG app, those chunks would then be sent to an LLM to generate a grounded answer.
+            7. The top chunks are sent to OpenRouter for grounded reasoning.
+            8. The assistant answer is shown alongside the retrieved context.
             """
         )
 

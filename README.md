@@ -1,6 +1,6 @@
 # Qdrant PDF RAG Demo
 
-Simple Streamlit app for uploading a PDF, extracting text with PyPDF2, storing the chunks in Qdrant, and showing the most relevant chunks for a question.
+Simple Streamlit app for uploading a PDF, extracting text with PyPDF2, storing the chunks in Qdrant, and sending the retrieved chunks to OpenRouter for grounded AI reasoning.
 
 ## Setup
 
@@ -18,7 +18,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-3. Copy `.env.example` to `.env` and fill in your Qdrant URL and API key.
+3. Copy `.env.example` to `.env` and fill in your Qdrant URL, Qdrant API key, and OpenRouter API key.
 
 ## Run
 
@@ -36,7 +36,9 @@ streamlit run search.py
 
 4. **Query & Retrieve**: Enter a question in the app. The query is vectorized the same way and searched against Qdrant. The top matches are returned with relevance scores.
 
-5. **Display**: Retrieved chunks are shown in expandable cards with page and chunk references. A demo answer section shows the top 3 matches stitched together as context.
+5. **Reason**: The top retrieved chunks are passed to OpenRouter as grounded context. The model answers the question using only those chunks.
+
+6. **Display**: Retrieved chunks are shown in expandable cards with page and chunk references, and the AI answer is shown above them.
 
 ## How it works (Technical)
 
@@ -44,6 +46,7 @@ streamlit run search.py
 - **Recursive Splitting**: RecursiveCharacterTextSplitter tries to split on `"\n\n"` (paragraphs) first, then `"\n"` (lines), then sentences, then spaces. This keeps related content together.
 - **Vectorization**: A stateless `HashingVectorizer` from scikit-learn converts text to fixed-size vectors (default 384 dimensions) without storing a vocabulary. Good for demo/local use.
 - **Vector DB**: Qdrant stores vectors and metadata. Queries return points ranked by cosine similarity.
+- **LLM**: OpenRouter receives the retrieved chunks and generates the final grounded answer.
 - **UI**: Streamlit provides a simple web interface for upload, sliders for chunk tuning, and expandable results.
 
 ## Tech Stack
@@ -59,9 +62,8 @@ streamlit run search.py
 
 ## Future Enhancements
 
-- Call an LLM (OpenAI, Mistral, etc.) to generate grounded answers from retrieved chunks.
 - Add hybrid search (keyword + semantic).
 - Support multiple file formats (DOCX, TXT, etc.).
 - Caching for faster re-retrieval on the same document.
 
-This is a simple retrieval demo of RAG. It does not call an LLM yet.
+This is now a basic RAG app: retrieval happens in Qdrant, then OpenRouter reasons over the retrieved chunks.
