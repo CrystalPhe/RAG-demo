@@ -1,7 +1,7 @@
 qdrant-client
-scikit-learn
 python-dotenv
 streamlit
 PyPDF2
 langchain-text-splitters
 sentence-transformers
+torchvision
