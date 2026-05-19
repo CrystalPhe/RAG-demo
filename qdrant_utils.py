@@ -74,6 +74,6 @@ def search_chunks(client: QdrantClient, query_vector, document_id: str, top_k: i
                 )
             ]
         ),
-        limit=top_k,
+        limit=max(top_k * 4, top_k),
         with_payload=True,
     ).points

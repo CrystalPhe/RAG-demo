@@ -11,11 +11,32 @@ from config import (
 )
 
 
+def _format_retrieved_context(retrieved, max_chunks: int = 5) -> str:
+    if isinstance(retrieved, str):
+        return retrieved.strip()
+
+    contexts: list[str] = []
+    ranked_points = sorted(retrieved, key=lambda point: getattr(point, "score", 0.0), reverse=True)
+
+    for point in ranked_points:
+        score = float(getattr(point, "score", 0.0) or 0.0)
+        payload = point.payload or {}
+        page_number = payload.get("page_number", "?")
+        chunk_index = payload.get("chunk_index", "?")
+        text = str(payload.get("text", "")).strip()
+        if text:
+            contexts.append(f"Page {page_number} | chunk {chunk_index} | score {score:.3f}\n{text}")
+        if len(contexts) >= max_chunks:
+            break
+
+    return "\n\n".join(contexts)
+
+
 def ask_openrouter(question: str, retrieved) -> str:
     if not OPENROUTER_API_KEY:
         return "Set OPENROUTER_API_KEY to generate an AI answer from the retrieved Qdrant context."
 
-    context = retrieved
+    context = _format_retrieved_context(retrieved)
     if not context:
         return "I could not find a strong match in the uploaded PDF, so there is not enough context to reason over."
 

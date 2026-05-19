@@ -38,15 +38,32 @@ def get_document_id(file_bytes: bytes) -> str:
     return hashlib.sha1(file_bytes).hexdigest()
 
 
+def normalize_pdf_text(text: str) -> str:
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"-\n(?=\w)", "", text)
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+
+    paragraphs: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        lines = [re.sub(r"\s+", " ", line).strip() for line in paragraph.split("\n")]
+        lines = [line for line in lines if line]
+        if lines:
+            paragraphs.append(" ".join(lines))
+
+    if paragraphs:
+        short_paragraphs = sum(1 for paragraph in paragraphs if len(paragraph.split()) <= 3)
+        if short_paragraphs / len(paragraphs) >= 0.6:
+            return " ".join(paragraphs).strip()
+
+    return "\n\n".join(paragraphs).strip()
+
+
 def extract_pdf_text(file_path: Path) -> list[tuple[int, str]]:
     reader = PdfReader(str(file_path))
     pages: list[tuple[int, str]] = []
     for index, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
-        text = re.sub(r"\r\n?", "\n", text)
-        text = re.sub(r"[ \t\f\v]+", " ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        normalized = text
+        normalized = normalize_pdf_text(text)
         if normalized:
             pages.append((index, normalized))
     return pages

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-from typing import Iterable
 from dotenv import load_dotenv
 import streamlit as st
 
@@ -19,15 +17,13 @@ from config import (
 )
 
 from pdf_utils import (
-    Chunk,
-    ensure_upload_dir,
     save_uploaded_pdf,
     get_document_id,
     extract_pdf_text,
     build_chunks,
 )
 
-from embeddings import load_embedding_model, vectorize_text
+from embeddings import load_embedding_model, vectorize_query, vectorize_passage
 from qdrant_utils import get_qdrant_client, ensure_collection, upsert_chunks, search_chunks
 from openrouter import ask_openrouter
 
@@ -43,6 +39,8 @@ def format_retrieved_context(retrieved, max_chunks: int = CONTEXT_MAX_CHUNKS, mi
 
     for point in ranked_points:
         score = float(getattr(point, "score", 0.0) or 0.0)
+        if score < min_score:
+            continue
 
         payload = point.payload or {}
         page_number = payload.get("page_number", "?")
@@ -54,11 +52,6 @@ def format_retrieved_context(retrieved, max_chunks: int = CONTEXT_MAX_CHUNKS, mi
             break
 
     return "\n\n".join(contexts)
-
-
-# Gọi OpenRouter để tạo câu trả lời dựa trên context từ Qdrant.
-# The OpenRouter request implementation was moved to openrouter.py (ask_openrouter)
-
 
 # Xóa trạng thái file cũ để người dùng có thể upload và index file mới.
 def reset_index() -> None:
@@ -112,7 +105,7 @@ def main() -> None:
 
                 client = get_qdrant_client()
                 ensure_collection(client)
-                upsert_chunks(client, chunks, vectorize_text)
+                upsert_chunks(client, chunks, vectorize_passage)
 
                 st.session_state["source_name"] = saved_path.name
                 st.session_state["page_count"] = len(pages)
@@ -133,7 +126,7 @@ def main() -> None:
         if question:
             try:
                 client = get_qdrant_client()
-                retrieved = search_chunks(client, vectorize_text(question), document_id, top_k)
+                retrieved = search_chunks(client, vectorize_query(question), document_id, top_k)
             except Exception as exc:
                 st.error(f"Qdrant search failed: {exc}")
                 retrieved = []
@@ -166,7 +159,7 @@ def main() -> None:
             1. The PDF is uploaded and saved locally.
             2. Text is extracted with PyPDF2.
             3. The text is chunked into small overlapping pieces.
-            4. Each chunk is embedded locally with a hashing vectorizer.
+            4. Each chunk is embedded locally with a retrieval-tuned embedding model.
             5. The vectors are stored in Qdrant with document metadata.
             6. A question is embedded and searched against the same Qdrant collection.
             7. The top chunks are sent to OpenRouter for grounded reasoning.
