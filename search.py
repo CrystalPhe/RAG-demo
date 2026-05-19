@@ -33,6 +33,8 @@ UPLOAD_DIR = Path("uploads")
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 200
 DEFAULT_TOP_K = 3
+DEFAULT_CONTEXT_MAX_CHUNKS = 5
+DEFAULT_CONTEXT_MIN_SCORE = 0.15
 VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "384"))
 QDRANT_URL = os.getenv("QDRANT_URL", "")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
@@ -42,6 +44,8 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
 OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "")
 OPENROUTER_APP_TITLE = os.getenv("OPENROUTER_APP_TITLE", APP_TITLE)
+CONTEXT_MAX_CHUNKS = int(os.getenv("CONTEXT_MAX_CHUNKS", str(DEFAULT_CONTEXT_MAX_CHUNKS)))
+CONTEXT_MIN_SCORE = float(os.getenv("CONTEXT_MIN_SCORE", str(DEFAULT_CONTEXT_MIN_SCORE)))
 
 HASHING_VECTORIZER = HashingVectorizer(
     n_features=VECTOR_SIZE,
@@ -210,15 +214,24 @@ def search_chunks(client: QdrantClient, query: str, document_id: str, top_k: int
 
 
 # Chuẩn bị context từ các chunk đã lấy được.
-def format_retrieved_context(retrieved) -> str:
+def format_retrieved_context(retrieved, max_chunks: int = CONTEXT_MAX_CHUNKS, min_score: float = CONTEXT_MIN_SCORE) -> str:
     contexts: list[str] = []
-    for rank, point in enumerate(retrieved[:3], start=1):
+    ranked_points = sorted(retrieved, key=lambda point: getattr(point, "score", 0.0), reverse=True)
+
+    for point in ranked_points:
+        score = float(getattr(point, "score", 0.0) or 0.0)
+        if score < min_score:
+            continue
+
         payload = point.payload or {}
         page_number = payload.get("page_number", "?")
         chunk_index = payload.get("chunk_index", "?")
         text = str(payload.get("text", "")).strip()
         if text:
-            contexts.append(f"Match {rank} | page {page_number} | chunk {chunk_index}\n{text}")
+            contexts.append(f"Page {page_number} | chunk {chunk_index} | score {score:.3f}\n{text}")
+        if len(contexts) >= max_chunks:
+            break
+
     return "\n\n".join(contexts)
 
 
@@ -235,17 +248,19 @@ def ask_openrouter(question: str, retrieved) -> str:
         {
             "role": "system",
             "content": (
-                "You are a grounded assistant for PDF question answering. "
-                "Use only the provided context from Qdrant. "
-                "If the context does not contain the answer, say that you do not know. "
-                "Cite page and chunk numbers when helpful."
+                "You are a grounded PDF question-answering assistant. "
+                "Answer only from the context provided from Qdrant. "
+                "Do not use outside knowledge. "
+                "If the context is insufficient, say exactly what is missing and that you cannot confirm the answer. "
+                "Be concise and cite page/chunk numbers inline when you use them. "
+                "Reply in the same language as the user question."
             ),
         },
         {
             "role": "user",
             "content": (
                 f"Question:\n{question}\n\n"
-                f"Context from Qdrant:\n{context}"
+                f"Retrieved context from Qdrant:\n{context}"
             ),
         },
     ]
