@@ -21,8 +21,8 @@ from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient, models
 
-# Hashing vectorizer 
-from sklearn.feature_extraction.text import HashingVectorizer
+# Semantic embeddings for RAG retrieval
+from sentence_transformers import SentenceTransformer
 
 
 load_dotenv()
@@ -34,8 +34,8 @@ DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 200
 DEFAULT_TOP_K = 3
 DEFAULT_CONTEXT_MAX_CHUNKS = 5
-DEFAULT_CONTEXT_MIN_SCORE = 0.15
-VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "384"))
+DEFAULT_CONTEXT_MIN_SCORE = 0.0
+VECTOR_SIZE = 384  # all-MiniLM-L6-v2 output dimension
 QDRANT_URL = os.getenv("QDRANT_URL", "")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "pdf_demo_chunks")
@@ -47,13 +47,16 @@ OPENROUTER_APP_TITLE = os.getenv("OPENROUTER_APP_TITLE", APP_TITLE)
 CONTEXT_MAX_CHUNKS = int(os.getenv("CONTEXT_MAX_CHUNKS", str(DEFAULT_CONTEXT_MAX_CHUNKS)))
 CONTEXT_MIN_SCORE = float(os.getenv("CONTEXT_MIN_SCORE", str(DEFAULT_CONTEXT_MIN_SCORE)))
 
-HASHING_VECTORIZER = HashingVectorizer(
-    n_features=VECTOR_SIZE,
-    alternate_sign=False,
-    norm="l2",
-    lowercase=True,
-    stop_words="english",
-)
+# Load semantic embedding model once at startup
+@st.cache_resource
+def load_embedding_model() -> SentenceTransformer:
+    with st.spinner("Loading embedding model (first time only, ~2 min)..."):
+        return SentenceTransformer("all-MiniLM-L6-v2")
+
+
+# Pre-load model at app startup
+def init_app() -> None:
+    load_embedding_model()
 
 
 @dataclass(frozen=True)
@@ -155,9 +158,10 @@ def ensure_collection(client: QdrantClient) -> None:
     )
 
 
-# Chuyển text thành vector 
+# Chuyển text thành vector sử dụng semantic embedding model
 def vectorize_text(text: str) -> list[float]:
-    vector = HASHING_VECTORIZER.transform([text]).toarray()[0]
+    model = load_embedding_model()
+    vector = model.encode(text, convert_to_numpy=True)
     return vector.astype(float).tolist()
 
 
@@ -220,8 +224,6 @@ def format_retrieved_context(retrieved, max_chunks: int = CONTEXT_MAX_CHUNKS, mi
 
     for point in ranked_points:
         score = float(getattr(point, "score", 0.0) or 0.0)
-        if score < min_score:
-            continue
 
         payload = point.payload or {}
         page_number = payload.get("page_number", "?")
@@ -316,6 +318,7 @@ def reset_index() -> None:
 
 # Streamlit main func
 def main() -> None:
+    init_app()
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
     st.write("Upload a PDF, split it into chunks, store them in Qdrant, and ask a question to retrieve related text.")
