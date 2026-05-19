@@ -37,3 +37,17 @@ def vectorize_passage(text: str) -> list[float]:
         normalize_embeddings=EMBEDDING_NORMALIZE,
     )
     return vector.astype(float).tolist()
+
+
+def vectorize_passages(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+
+    model = load_embedding_model()
+    prefixed = [f"{EMBEDDING_PASSAGE_PREFIX}{text}" for text in texts]
+    vectors = model.encode(
+        prefixed,
+        convert_to_numpy=True,
+        normalize_embeddings=EMBEDDING_NORMALIZE,
+    )
+    return vectors.astype(float).tolist()

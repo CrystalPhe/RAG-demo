@@ -23,9 +23,11 @@ from pdf_utils import (
     build_chunks,
 )
 
-from embeddings import load_embedding_model, vectorize_query, vectorize_passage
+from embeddings import load_embedding_model, vectorize_query, vectorize_passage, vectorize_passages
 from qdrant_utils import get_qdrant_client, ensure_collection, upsert_chunks, search_chunks
 from openrouter import ask_openrouter
+
+CHUNKING_VERSION = 3
 
 
 def init_app() -> None:
@@ -85,6 +87,25 @@ def main() -> None:
         uploaded_file = st.file_uploader("Choose a PDF", type=["pdf"])
         chunk_size = st.slider("Chunk size (characters)", min_value=200, max_value=4000, value=1000, step=100)
         chunk_overlap = st.slider("Chunk overlap (characters)", min_value=0, max_value=1000, value=200, step=50)
+        use_semantic_chunking = st.checkbox("Use semantic chunking", value=True)
+        semantic_similarity_threshold = st.slider(
+            "Semantic boundary threshold",
+            min_value=0.40,
+            max_value=0.90,
+            value=0.62,
+            step=0.01,
+            disabled=not use_semantic_chunking,
+            help="Lower value keeps larger topic blocks. Higher value creates more topic boundaries.",
+        )
+        semantic_min_chunk_chars = st.slider(
+            "Min chars before topic split",
+            min_value=120,
+            max_value=800,
+            value=250,
+            step=10,
+            disabled=not use_semantic_chunking,
+            help="Avoids tiny chunks by requiring a minimum chunk length before semantic splitting.",
+        )
         top_k = st.slider("Top K retrieved chunks", min_value=1, max_value=10, value=DEFAULT_TOP_K, step=1)
 
         if st.button("Clear current document"):
@@ -94,14 +115,32 @@ def main() -> None:
     if uploaded_file is not None:
         file_bytes = uploaded_file.getvalue()
         document_id = get_document_id(file_bytes)
-        current_signature = (document_id, chunk_size, chunk_overlap)
+        current_signature = (
+            document_id,
+            chunk_size,
+            chunk_overlap,
+            CHUNKING_VERSION,
+            use_semantic_chunking,
+            semantic_similarity_threshold,
+            semantic_min_chunk_chars,
+        )
         cached_signature = st.session_state.get("index_signature")
 
         if cached_signature != current_signature:
             try:
                 saved_path = save_uploaded_pdf(uploaded_file.name, file_bytes)
                 pages = extract_pdf_text(saved_path)
-                chunks = build_chunks(pages, chunk_size, chunk_overlap, saved_path.name, document_id)
+                chunks = build_chunks(
+                    pages,
+                    chunk_size,
+                    chunk_overlap,
+                    saved_path.name,
+                    document_id,
+                    use_semantic_chunking=use_semantic_chunking,
+                    semantic_similarity_threshold=semantic_similarity_threshold,
+                    semantic_min_chunk_chars=semantic_min_chunk_chars,
+                    embed_many_fn=vectorize_passages,
+                )
 
                 client = get_qdrant_client()
                 ensure_collection(client)
